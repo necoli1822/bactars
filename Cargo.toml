@@ -1,0 +1,55 @@
+[package]
+name = "bactars"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sunju Kim <n.e.coli.1822@gmail.com>"]
+description = "Rust-native, container-free prokaryotic genome annotation pipeline (orchestrator)"
+license = "GPL-3.0-only"
+repository = "https://github.com/necoli1822/bactars"
+homepage = "https://github.com/necoli1822/bactars"
+readme = "README.md"
+keywords = ["bioinformatics", "genome", "annotation", "prokaryote", "bacteria"]
+categories = ["science", "command-line-utilities"]
+
+[lib]
+name = "bactars"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bactars"
+path = "src/bin/bactars.rs"
+
+[dependencies]
+# Subunit crates consumed as in-process library APIs (no subprocesses).
+# 100% published crates.io deps — NO path deps, no local trees required.
+rustygal = "0.2.0"      # CDS prediction (Rust prodigal)
+rustyhmmer = "0.1.3"    # HMM annotation (Rust HMMER hmmsearch); profile-parallel search()
+trnascan-rs = "0.2.1"   # tRNA detection (Rust tRNAscan-SE); faithful FaithfulSearcher API, embeds infernox 0.2.0
+oxagorn = "0.2.0"       # tRNA/tmRNA detection (Rust ARAGORN)
+rust-ise = "0.2.3"      # IS-element detection (Rust ISEScan); build-db source auto-download + fpc pure-Rust ISfinder nt
+infernox = "0.2.0"      # covariance-model ncRNA search (single-crate Infernal port; --Fmid + notrunc fixes)
+minced-rs = "0.1.0"     # CRISPR arrays (Rust MinCED port, byte-parity)
+tandemox = "0.1.0"      # tandem repeats (standalone TRF-comparable crate; replaces in-tree scanner)
+oricle = "0.2.0"        # oriC replication-origin (standalone GC-skew+DnaA-box crate; replaces in-tree scanner)
+signalox = "0.1.0"      # learned signal-peptide/cleavage/TM (CNN+CRF); replaces rule-based signalpep
+lotrs = "0.1.0"         # learned subcellular localization (CNN)
+balrox = "0.1.0"        # learned gene-model quality score (dilated TCN); non-destructive CDS scoring
+needletail = "0.6"      # genome FASTA input (0.6 to match oxagorn — single liblzma linker)
+noodles-gff = "0.57"    # GFF3 output
+noodles-core = "0.20"   # Position (1-based) for GFF3 records
+rayon = "1"             # contig-level parallelism (CRISPR scan; already in the tree)
+# Pure-Rust DB provisioning + decompression (replaces gunzip/tar/curl/wget/sha256sum
+# shell-outs — mmseqs stays the ONLY sanctioned external binary; see util_io.rs).
+flate2 = "1"            # in-process gzip decompression (.gz DB sources)
+tar = "0.4"             # in-process tar extraction (path-traversal-guarded)
+sha2 = "0.10"           # in-process sha256 verification of downloads
+ureq = "2"              # pure-Rust (rustls) HTTP(S) download client
+
+# AMR is done the Bakta way: an AMR HMM DB (NCBI AMRFinderPlus / NCBIfams AMR
+# subset) searched via the already-in-process rustyhmmer HMM path (see --amr).
+# No ARGenus dependency — no minimap2 / PAF orchestration needed.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
