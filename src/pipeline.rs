@@ -26,8 +26,11 @@ pub struct HmmDb {
 
 /// Pipeline configuration.
 pub struct Config {
-    /// Genetic code for CDS translation (11 = bacteria/archaea).
-    pub trans_table: i32,
+    /// Genetic code for CDS translation. `None` = auto-detect (compare NCBI
+    /// tables 11/4/25 by total gene score, prodigal-meta style — picks table 4 for
+    /// Mollicutes, 25 for Gracilibacteria/SR1, 11 otherwise). `Some(n)` forces
+    /// table `n`. See [`crate::cds::predict_cds`].
+    pub trans_table: Option<i32>,
     /// HMM databases to annotate CDS with (Pfam / NCBIfams / AntiFam / ...).
     pub hmm_dbs: Vec<HmmDb>,
     /// trnascan-rs `data/models` directory. `Some` enables bacterial (`-B`)
@@ -105,7 +108,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            trans_table: 11,
+            trans_table: None,
             hmm_dbs: Vec::new(),
             trna_models_dir: None,
             detect_tmrna: false,

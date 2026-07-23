@@ -39,16 +39,30 @@ pub struct Cds {
 ///    to pyrodigal `-p meta`) per contig — the same `meta_api` engine rust-ise
 ///    uses for ISOSDB. Genes are called against the best-scoring pretrained bin.
 ///
-/// `trans_table` is the genetic code (11 for bacteria/archaea) used by the
-/// single-mode path; the metagenomic bins carry their own per-bin translation
-/// tables. Only genuinely empty input (no usable sequence) is a hard error.
-pub fn predict_cds(contigs: &[Contig], trans_table: i32) -> Result<Vec<Cds>, String> {
+/// `trans_table` selects the genetic code for the single-mode (whole-genome)
+/// path: `Some(n)` forces NCBI translation table `n`; `None` **auto-detects** it,
+/// mirroring prodigal's metagenomic bin-selection criterion — train a model under
+/// each candidate table, and keep the table whose genome dynamic-programming **path
+/// score** ([`genome_path_score`]) is highest. This is self-validating: a normal
+/// bacterium always scores highest under its true table 11, while a Mollicute
+/// (TGA=Trp) only wins table 4 when the readthrough model genuinely fits, so
+/// auto-detection never regresses a table-11 genome. Auto-detection compares
+/// **11** (standard) vs **4** (Mollicutes, TGA=Trp) — the only two the score can tell
+/// apart. Table **25** (Gracilibacteria/SR1, TGA=Gly) is gene-structure-identical to
+/// table 4 (both make TGA coding), so it always ties table 4 on score and can only be
+/// requested explicitly via `Some(25)`; its coordinates match table 4 anyway. The
+/// metagenomic bins carry their own per-bin tables (incl. table 4), so the
+/// short-contig path is already code-aware and ignores `trans_table`.
+/// Only genuinely empty input (no usable sequence) is a hard error.
+pub fn predict_cds(contigs: &[Contig], trans_table: Option<i32>) -> Result<Vec<Cds>, String> {
     if contigs.is_empty() {
         return Err("no contigs to predict on".to_string());
     }
     let largest = contigs.iter().map(|c| c.seq.len()).max().unwrap_or(0);
 
-    // Short-contig / fragmented regime: route through the real metagenomic mode.
+    // Short-contig / fragmented regime: route through the real metagenomic mode
+    // (its pretrained bins already include table-4 models and pick by score, so
+    // the genetic code is auto-selected there regardless of `trans_table`).
     if largest < 20_000 {
         return predict_cds_meta(contigs);
     }
@@ -68,16 +82,74 @@ pub fn predict_cds(contigs: &[Contig], trans_table: i32) -> Result<Vec<Cds>, Str
         }
         pooled.extend_from_slice(&c.seq);
     }
-    let tinf = train_on_sequence(&pooled, trans_table, false)?;
-    let cfg = GeneFinderConfig::default();
 
+    match trans_table {
+        // Forced table: honour it exactly (no auto-detection). `Training` is a large
+        // (~550 KB `mot_wt`/`gene_dc`) struct — box it so it lives on the heap and
+        // does not inflate this frame (which would overflow a 2 MB worker stack).
+        Some(t) => {
+            let tinf = Box::new(train_on_sequence(&pooled, t, false)?);
+            call_with_model(contigs, &tinf)
+        }
+        // Auto-detect: compare the prokaryotic candidate codes by the genome's
+        // dynamic-programming path score (prodigal's own metagenomic bin-selection
+        // metric) and keep the winning table. `>` (not `>=`) keeps table 11 on ties,
+        // so the standard code is the default whenever an alternative doesn't clearly win.
+        None => {
+            // Candidates are 11 (standard) vs 4 (TGA=Trp, Mollicutes). Table 25
+            // (TGA=Gly, Gracilibacteria/SR1) is intentionally NOT a candidate: it is
+            // gene-structure-identical to table 4 (both make TGA a coding codon), so
+            // its path score always TIES table 4 and it can never be distinguished by
+            // gene-finding — telling 25 from 4 needs taxonomy (they differ only in the
+            // amino acid at TGA, Gly vs Trp). A genome known to be Gracilibacteria can
+            // still force it with `--translation-table 25`; its coordinates are correct
+            // under table 4 regardless.
+            const CANDIDATES: [i32; 2] = [11, 4];
+            // `Training` is ~550 KB; box every model so the candidate we retain and the
+            // per-iteration model stay on the heap (holding two by value would overflow
+            // a 2 MB worker stack — the frame is reserved on entry regardless of input).
+            let mut best: Option<(f64, i32, Box<rustygal::training::Training>)> = None;
+            let mut scores: Vec<(i32, f64)> = Vec::with_capacity(CANDIDATES.len());
+            for &t in &CANDIDATES {
+                let tinf = Box::new(train_on_sequence(&pooled, t, false)?);
+                let score = genome_path_score(contigs, &tinf);
+                scores.push((t, score));
+                if best.as_ref().map_or(true, |b| score > b.0) {
+                    best = Some((score, t, tinf));
+                }
+            }
+            let (_, chosen, tinf) = best.ok_or("gene-model training produced no candidate")?;
+            if chosen != 11 {
+                let s: Vec<String> = scores
+                    .iter()
+                    .map(|(t, sc)| format!("code{t}={sc:.0}"))
+                    .collect();
+                eprintln!(
+                    "[bactars] genetic-code auto-detect: chose translation table {chosen} \
+                     (non-standard, Mollicutes; {}). TGA is read as Trp here.",
+                    s.join(" ")
+                );
+            }
+            call_with_model(contigs, &tinf)
+        }
+    }
+}
+
+/// Gene-call every contig with a trained model and return the predicted CDS. This
+/// is the OUTPUT pass (byte-identical to the previous single-model path); genetic-code
+/// selection is done separately by [`genome_path_score`].
+fn call_with_model(
+    contigs: &[Contig],
+    tinf: &rustygal::training::Training,
+) -> Result<Vec<Cds>, String> {
+    let cfg = GeneFinderConfig::default();
     let mut out = Vec::new();
     for c in contigs {
         let slen = c.seq.len() as i32;
         if slen < 1 {
             continue;
         }
-        let result = find_genes(&c.seq, Some(&tinf), &cfg)?;
+        let result = find_genes(&c.seq, Some(tinf), &cfg)?;
         if result.num_genes == 0 {
             continue;
         }
@@ -100,13 +172,73 @@ pub fn predict_cds(contigs: &[Contig], trans_table: i32) -> Result<Vec<Cds>, Str
             &rseq,
             &useq,
             slen,
-            &tinf,
+            tinf,
             1,
             &c.name,
         );
         parse_protein_fasta(&buf, &c.name, &mut out);
     }
     Ok(out)
+}
+
+/// Score a whole genome under one trained model with prodigal's genetic-code
+/// selection metric: the sum over contigs of the best dynamic-programming **path
+/// score** (`nodes[ipath].score`). This mirrors `find_genes`' internal node pipeline
+/// (add → sort → score → record-overlaps → dprog) up to the traceback, and mirrors
+/// how the metagenomic mode picks its winning bin — the path score already folds in
+/// per-gene coding, start, and intergenic terms, so a wrong-code run that fragments
+/// genes at spurious stops scores LOWER even though it emits more (shorter) genes.
+/// That is exactly why the naive Σ-of-gene-scores does not work: it rewards fragment
+/// count. Runs on the single-mode (≥20 kb) path only.
+fn genome_path_score(contigs: &[Contig], tinf: &rustygal::training::Training) -> f64 {
+    use rustygal::dprog::dprog;
+    use rustygal::node::{
+        add_nodes, compare_nodes, record_overlapping_starts, score_nodes, Node, STT_NOD,
+    };
+    use rustygal::sequence::{Mask, MAX_MASKS};
+
+    // No sequence masking (nmask = 0), matching find_genes' default config.
+    let mlist = vec![Mask { begin: 0, end: 0 }; MAX_MASKS];
+    let mut total = 0.0f64;
+    for c in contigs {
+        let slen = c.seq.len() as i32;
+        if slen < 1 {
+            continue;
+        }
+        // Pad the 2-bit/4-bit packed buffers: the gene-finding node/score kernels read
+        // a full codon (up to `slen+2`) via `base2`, one base past the sequence end, so
+        // `slen/4 + 1` is off-by-one for some `slen`. `find_genes` sidesteps this by
+        // allocating a fixed MAX_SEQ; here a small fixed margin (8 bytes = 32 bases) is
+        // enough and cheap. (`call_with_model` needs no margin — its small buffers only
+        // feed post-gene-finding translation, and the node kernels there run inside
+        // `find_genes` on its own oversized buffers.)
+        let mut seq = vec![0u8; c.seq.len() / 4 + 8];
+        let mut rseq = vec![0u8; c.seq.len() / 4 + 8];
+        let mut useq = vec![0u8; c.seq.len() / 8 + 8];
+        let mut gc = 0.0;
+        bitmap::build_bitmaps(&c.seq, slen, &mut seq, &mut rseq, &mut useq, &mut gc);
+
+        let max_slen = if slen > STT_NOD as i32 * 8 {
+            (slen / 8) as usize
+        } else {
+            STT_NOD
+        };
+        let mut nodes = vec![Node::default(); max_slen];
+        // closed = 0, meta flag = 0 (single mode), start-overlap flag = 1 — the exact
+        // arguments find_genes uses for the single-model gene call.
+        let nn = add_nodes(&seq, &rseq, slen, &mut nodes, 0, &mlist, 0, tinf);
+        if nn <= 0 {
+            continue;
+        }
+        nodes[..nn as usize].sort_unstable_by(compare_nodes);
+        score_nodes(&seq, &rseq, slen, &mut nodes, nn, tinf, 0, 0);
+        record_overlapping_starts(&mut nodes, nn, tinf, 1);
+        let ipath = dprog(&mut nodes, nn, tinf, 1);
+        if ipath >= 0 {
+            total += nodes[ipath as usize].score;
+        }
+    }
+    total
 }
 
 /// Short-contig / fragmented regime: gene-call each contig with rustygal's
@@ -251,7 +383,7 @@ mod tests {
         let largest = contigs.iter().map(|c| c.seq.len()).max().unwrap();
         assert!(largest < 20_000, "test setup: contigs must be short");
 
-        let cds = predict_cds(&contigs, 11).expect("meta mode should not error");
+        let cds = predict_cds(&contigs, Some(11)).expect("meta mode should not error");
         assert!(
             !cds.is_empty(),
             "metagenomic path called zero genes on short contigs with obvious ORFs"
@@ -297,11 +429,11 @@ mod tests {
 
     #[test]
     fn empty_input_errors() {
-        assert!(predict_cds(&[], 11).is_err());
+        assert!(predict_cds(&[], None).is_err());
         let empties = vec![
             Contig { name: "a".into(), seq: Vec::new() },
             Contig { name: "b".into(), seq: Vec::new() },
         ];
-        assert!(predict_cds(&empties, 11).is_err());
+        assert!(predict_cds(&empties, None).is_err());
     }
 }

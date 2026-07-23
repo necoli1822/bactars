@@ -50,6 +50,9 @@ fn main() {
     let mut gff3_out: Option<String> = None;
     let mut gbff_out: Option<String> = None;
     let mut threads: usize = 0;
+    // None = auto-detect the genetic code (compare NCBI tables 11/4/25 by total gene
+    // score); Some(n) forces table n. See cds::predict_cds.
+    let mut trans_table: Option<i32> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -74,6 +77,15 @@ fn main() {
                     std::process::exit(2);
                 }
             },
+            // Genetic code: default auto-detect (11/4/25 by score); this forces one.
+            "--translation-table" | "--trans-table" | "-g" => {
+                let v = require_arg(&arg, it.next());
+                let t: i32 = v.parse().unwrap_or_else(|_| {
+                    eprintln!("--translation-table needs an NCBI genetic-code number (e.g. 11, 4, 25)");
+                    std::process::exit(2);
+                });
+                trans_table = Some(t);
+            }
             "--tmrna" => detect_tmrna = true,
             "--is-db" => match it.next() {
                 Some(d) => is_db_dir = Some(d),
@@ -127,7 +139,8 @@ fn main() {
             "--gff3" => gff3_out = Some(require_arg(&arg, it.next())),
             "--gbff" => gbff_out = Some(require_arg(&arg, it.next())),
             "-h" | "--help" => {
-                eprintln!("usage: bactars <genome.fna> [--db BUNDLE] [--fast] [--full] [--pfam D] [--ncbifams D] [--antifam D] [--amr D] [--trna MODELS_DIR] [--tmrna] [--is-db DIR] [--ncrna CM_DB] [--crispr] [--oric] [--gaps] [--tandem] [--signalpep] [--compartment] [--gene-score] [--meta DIR] [--kofam DIR] [--psc DIR] [--amr-variant DIR] [--vfdb DIR] [--plasmid DIR] [--species DIR] [--sorf] [--pseudo] [--integron DIR] [--prophage DIR] [--orit DIR] [--threads N] [--gff3 FILE] [--gbff FILE]");
+                eprintln!("usage: bactars <genome.fna> [--db BUNDLE] [--fast] [--full] [--translation-table N] [--pfam D] [--ncbifams D] [--antifam D] [--amr D] [--trna MODELS_DIR] [--tmrna] [--is-db DIR] [--ncrna CM_DB] [--crispr] [--oric] [--gaps] [--tandem] [--signalpep] [--compartment] [--gene-score] [--meta DIR] [--kofam DIR] [--psc DIR] [--amr-variant DIR] [--vfdb DIR] [--plasmid DIR] [--species DIR] [--sorf] [--pseudo] [--integron DIR] [--prophage DIR] [--orit DIR] [--threads N] [--gff3 FILE] [--gbff FILE]");
+                eprintln!("       --translation-table N (alias -g) forces the genetic code; default auto-detects it (NCBI 11 standard / 4 Mollicutes / 25 Gracilibacteria) by best gene score.");
                 eprintln!("       --fast enables every non-ML stage (oric/gaps/tandem/crispr/tmrna + sorf/pseudo); DB-backed stages self-skip when their DB is absent.");
                 eprintln!("       --full = --fast plus the learned ML models (signalpep/compartment/gene-score); pure-Rust but conv-heavy (~3x wall time).");
                 eprintln!("       --db BUNDLE resolves every unset DB path by the bactars-db bundle layout (explicit flags override).");
@@ -235,7 +248,7 @@ fn main() {
     }
 
     let config = Config {
-        trans_table: 11,
+        trans_table,
         hmm_dbs,
         trna_models_dir,
         detect_tmrna,

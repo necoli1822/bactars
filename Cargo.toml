@@ -1,6 +1,6 @@
 [package]
 name = "bactars"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Sunju Kim <n.e.coli.1822@gmail.com>"]
 description = "Rust-native, container-free prokaryotic genome annotation pipeline (orchestrator)"

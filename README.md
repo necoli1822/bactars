@@ -55,7 +55,15 @@ Every downloadable DB has a `db/` directory; `--db <bundle>` then resolves every
 per-DB path from that one root by convention.
 
 - **CDS**: `rustygal` (Rust prodigal). Byte-identical gene set to C prodigal
-  (MG1655: 4319 CDS).
+  (MG1655: 4319 CDS). The **genetic code is auto-detected**: bactars trains a gene
+  model under NCBI table 11 (standard) and table 4 (Mollicutes, TGA=Trp) and keeps
+  the one with the higher dynamic-programming path score — prodigal's own
+  metagenomic bin-selection criterion, so a normal genome is never mis-flipped while
+  a *Mycoplasma*/*Spiroplasma*/*Ureaplasma* genome (where table 11 fragments genes at
+  every internal TGA) is correctly called under table 4. On the RefSeq benchmark this
+  lifts Mollicute CDS precision from ~27 % (fragmented) to ~95–99 %. `--translation-table N`
+  (alias `-g`) forces a specific code; `-g 25` selects Gracilibacteria/SR1 (TGA=Gly),
+  which shares table 4's gene structure and so can only be requested explicitly.
 - **HMM**: `rustyhmmer` (`api::HmmAnnotator`, byte-identical to C HMMER 3.4).
   Pfam / NCBIfams / AntiFam under the gathering cutoff, matching Bakta.
 - **tRNA**: `trnascan-rs` (Rust tRNAscan-SE 2.0 + embedded infernox). Byte-identical
